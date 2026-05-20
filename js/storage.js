@@ -8,7 +8,8 @@ const Storage = {
         WRONG_ANSWERS: 'quizmaster_wrong',
         HISTORY: 'quizmaster_history',
         SETTINGS: 'quizmaster_settings',
-        QUESTION_BANKS: 'quizmaster_question_banks'
+        QUESTION_BANKS: 'quizmaster_question_banks',
+        QUIZ_PROGRESS: 'quizmaster_progress'  // 答题进度
     },
 
     /**
@@ -210,6 +211,45 @@ const Storage = {
     getWrongAnswersForBank(bankId) {
         const wrongAnswers = this.getWrongAnswers();
         return wrongAnswers.filter(w => w.bankId === bankId);
+    },
+
+    /**
+     * 保存答题进度
+     * @param {Object} progress - 包含 currentIndex, answeredRecords, userAnswers, stats, bankId, quizMode
+     */
+    saveQuizProgress(progress) {
+        try {
+            const data = {
+                ...progress,
+                timestamp: Date.now()
+            };
+            localStorage.setItem(this.KEYS.QUIZ_PROGRESS, JSON.stringify(data));
+            return true;
+        } catch (e) {
+            console.error('保存答题进度失败:', e);
+            return false;
+        }
+    },
+
+    /**
+     * 读取答题进度
+     */
+    getQuizProgress() {
+        try {
+            const data = localStorage.getItem(this.KEYS.QUIZ_PROGRESS);
+            if (!data) return null;
+            return JSON.parse(data);
+        } catch (e) {
+            console.error('读取答题进度失败:', e);
+            return null;
+        }
+    },
+
+    /**
+     * 清除答题进度
+     */
+    clearQuizProgress() {
+        localStorage.removeItem(this.KEYS.QUIZ_PROGRESS);
     },
 
     /**

@@ -309,14 +309,12 @@
         state.stats = { correct: 0, wrong: 0 };
         state.wrongAnswers = [];
         state.wrongStreakCount = {};  // 重置连续答对计数
+        state.answeredRecords = {};
+        state.userAnswers = {};
         // 注意：currentBankId 由调用方设置，quiz模式下不清空
         
         // 获取原始题目数组（顺序刷题和随机刷题共用）
         const allQuestions = Storage.getQuestions();
-        
-        // 答题记录和用户答案统一用原始题目ID作为key
-        // state.answeredRecords = { questionId: true/false/null }
-        // state.userAnswers = { questionId: answer }
         
         if (mode === 'random') {
             // 随机刷题：打乱顺序，但使用原始题目对象
@@ -329,6 +327,43 @@
             state.displayQuestions = [...allQuestions];
         }
         
+        // 检查是否有保存的答题进度
+        const savedProgress = Storage.getQuizProgress();
+        const questionIds = state.displayQuestions.map(q => q.id).sort().join(',');
+        const savedIds = savedProgress?.questionIds?.sort()?.join(',');
+        
+        if (savedProgress && savedProgress.questionIds && questionIds === savedIds) {
+            // 恢复答题进度
+            state.currentIndex = savedProgress.currentIndex || 0;
+            state.answeredRecords = savedProgress.answeredRecords || {};
+            state.userAnswers = savedProgress.userAnswers || {};
+            state.stats = savedProgress.stats || { correct: 0, wrong: 0 };
+            
+            // 重新计算错题列表
+            Object.entries(state.answeredRecords).forEach(([qId, result]) => {
+                if (result === false) {
+                    const question = state.displayQuestions.find(q => q.id === qId);
+                    if (question && !state.wrongAnswers.find(w => w.id === qId)) {
+                        state.wrongAnswers.push(question);
+                    }
+                }
+            });
+            
+            // 渲染恢复的题目
+            updateStats();
+            switchView('quiz');
+            renderQuestion();
+            
+            // 如果当前题目已答题，显示答案
+            if (state.answeredRecords[state.displayQuestions[state.currentIndex]?.id] !== undefined) {
+                state.answered = true;
+                showAnswerFeedback();
+            }
+            
+            return;
+        }
+        
+        // 没有保存的进度，从头开始
         // 更新UI
         updateStats();
         switchView('quiz');
@@ -511,6 +546,13 @@
             setTimeout(() => optionEl.classList.remove('ripple'), 400);
             state.selectedAnswer = value;
             state.selectedAnswers = [value];
+            
+            // 单选题选择后自动提交
+            setTimeout(() => {
+                if (!state.answered && state.selectedAnswer) {
+                    submitAnswer();
+                }
+            }, 100);
         }
         
         DOM.submitBtn.disabled = !state.selectedAnswer;
@@ -576,6 +618,7 @@
         if (!state.answered && state.selectedAnswer === null) {
             if (!state.answeredRecords) state.answeredRecords = {};
             state.answeredRecords[currentQuestion.id] = null;
+            saveQuizProgress();
         }
         
         state.currentIndex = index;
@@ -592,6 +635,7 @@
             if (!state.answered && state.selectedAnswer === null) {
                 if (!state.answeredRecords) state.answeredRecords = {};
                 state.answeredRecords[currentQuestion.id] = null;
+                saveQuizProgress();
             }
             state.currentIndex--;
             renderQuestion();
@@ -608,6 +652,7 @@
                 const currentQuestion = state.displayQuestions[state.currentIndex];
                 if (!state.answeredRecords) state.answeredRecords = {};
                 state.answeredRecords[currentQuestion.id] = null;
+                saveQuizProgress();
             }
         }
         nextQuestion();
@@ -857,6 +902,16 @@
         // 更新按钮
         DOM.submitBtn.style.display = 'none';
         DOM.nextBtn.style.display = 'inline-flex';
+        
+        // 保存答题进度
+        saveQuizProgress();
+        
+        // 答案正确则自动跳转下一题
+        if (isCorrect) {
+            setTimeout(() => {
+                nextQuestion();
+            }, 800);
+        }
     }
 
     function nextQuestion() {
@@ -870,6 +925,9 @@
     }
 
     function finishQuiz() {
+        // 清除答题进度
+        Storage.clearQuizProgress();
+        
         // 保存历史
         Storage.saveHistory({
             mode: state.quizMode,
@@ -963,6 +1021,24 @@
     function updateStats() {
         DOM.correctCountEl.textContent = state.stats.correct;
         DOM.wrongCountMiniEl.textContent = state.stats.wrong;
+    }
+
+    /**
+     * 保存答题进度到本地缓存
+     */
+    function saveQuizProgress() {
+        // 不保存复习模式
+        if (state.quizMode === 'review') return;
+        
+        Storage.saveQuizProgress({
+            currentIndex: state.currentIndex,
+            answeredRecords: state.answeredRecords,
+            userAnswers: state.userAnswers,
+            stats: state.stats,
+            bankId: state.currentBankId,
+            quizMode: state.quizMode,
+            questionIds: state.displayQuestions.map(q => q.id)
+        });
     }
 
     function updateWrongCountBadge() {
