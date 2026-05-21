@@ -47,6 +47,82 @@ const ExcelParser = {
     },
 
     /**
+     * 智能检测 Excel 列布局
+     * 支持4种题库格式：
+     *   1. 答案 | 题目 | 选项A | 选项B | ...（用例题库）
+     *   2. 题目 | 答案 | 选项A | 选项B | ...
+     *   3. 题目 | 答案（仅2列，无选项）
+     *   4. 答案 | 题目（仅2列，无选项）
+     * 检测策略：先表头关键词匹配 → 再启发式（列平均文本长度）
+     */
+    detectColumnLayout(data) {
+        const defaults = { answerCol: 0, questionCol: 1, optionStartCol: 2, dataStartRow: 1 };
+        if (!data || data.length < 2) return defaults;
+
+        const headerRow = data[0];
+        const headerCells = headerRow.map(c => String(this.getCellValue(c) || '').trim());
+        const colCount = headerCells.length;
+
+        // Step 1: 表头关键词全匹配
+        const answerIdx = headerCells.findIndex(s =>
+            /^(答案|正确选项|正确答案|answer|标准答案|正确)$/i.test(s)
+        );
+        const questionIdx = headerCells.findIndex(s =>
+            /^(题目|题干|问题|question|试题|试题内容|题干内容|内容|题面)$/i.test(s)
+        );
+
+        if (answerIdx >= 0 && questionIdx >= 0 && answerIdx !== questionIdx) {
+            const optionStartCol = Math.max(answerIdx, questionIdx) + 1;
+            return { answerCol: answerIdx, questionCol: questionIdx, optionStartCol, dataStartRow: 1 };
+        }
+
+        // Step 2: 检查第一行是否像表头（有选项字母标记 A/B/C/D 等）
+        const looksLikeHeader = headerCells.some(s =>
+            /^(A|B|C|D|E|F|G|H|I|J|选项[A-J]|[A-J]选项)$/i.test(s)
+        );
+
+        const startRow = looksLikeHeader ? 1 : 0;
+        const sampleRows = data.slice(startRow, Math.min(startRow + 3, data.length));
+
+        if (sampleRows.length === 0) return { ...defaults, dataStartRow: startRow };
+
+        // 计算每列平均文本长度（短=答案，长=题目）
+        const colAvgs = [];
+        for (let c = 0; c < colCount; c++) {
+            let totalLen = 0, count = 0;
+            for (const row of sampleRows) {
+                const val = String(this.getCellValue(row[c]) || '');
+                if (val.length > 0) { totalLen += val.length; count++; }
+            }
+            colAvgs.push({ col: c, avg: count > 0 ? totalLen / count : 0 });
+        }
+
+        const sorted = [...colAvgs].sort((a, b) => a.avg - b.avg);
+
+        if (colCount === 2) {
+            // 仅2列：短列=答案，长列=题目
+            return {
+                answerCol: sorted[0].col,
+                questionCol: sorted[1].col,
+                optionStartCol: 2,
+                dataStartRow: startRow
+            };
+        }
+
+        // 3列及以上：最短=答案，最长=题目
+        const answerCol = sorted[0].col;
+        const questionCol = sorted[sorted.length - 1].col;
+        const maxCol = Math.max(answerCol, questionCol);
+
+        return {
+            answerCol,
+            questionCol,
+            optionStartCol: colCount > maxCol + 1 ? maxCol + 1 : colCount,
+            dataStartRow: startRow
+        };
+    },
+
+    /**
      * 解析题目数据
      * @param {Array} data - Excel数据（二维数组）
      * @returns {Array} 题目数组
@@ -56,47 +132,42 @@ const ExcelParser = {
             return [];
         }
 
-        // 跳过表头，从第二行开始
+        const layout = this.detectColumnLayout(data);
         const questions = [];
-        
-        for (let i = 1; i < data.length; i++) {
+
+        for (let i = layout.dataStartRow; i < data.length; i++) {
             const row = data[i];
             if (!row || row.length < 2) continue;
-            
-            // 获取正确答案（A列，第1列）
-            let answer = this.getCellValue(row[0]) || 'A';
-            answer = this.normalizeAnswer(answer);
-            
-            // 获取题目内容（B列，第2列）
-            const questionText = this.getCellValue(row[1]);
+
+            // 根据检测到的布局读取答案
+            const rawAnswer = this.getCellValue(row[layout.answerCol]) || 'A';
+            let answer = this.normalizeAnswer(rawAnswer);
+
+            // 根据检测到的布局读取题目
+            const questionText = this.getCellValue(row[layout.questionCol]);
             if (!questionText) continue;
-            
-            // 获取选项（C-L列，第3-12列，支持A-J共10个选项）
-            const options = [
-                this.getCellValue(row[2]) || '',
-                this.getCellValue(row[3]) || '',
-                this.getCellValue(row[4]) || '',
-                this.getCellValue(row[5]) || '',
-                this.getCellValue(row[6]) || '',
-                this.getCellValue(row[7]) || '',
-                this.getCellValue(row[8]) || '',
-                this.getCellValue(row[9]) || '',
-                this.getCellValue(row[10]) || '',
-                this.getCellValue(row[11]) || ''
-            ].filter(opt => opt.trim() !== '');
-            
-            // 判断题型（根据答案字符数自动判断）
-            const type = this.detectQuestionType(questionText, options, answer);
-            
-            questions.push({
+
+            // 从选项起始列开始读取选项
+            const options = [];
+            for (let c = layout.optionStartCol; c < row.length; c++) {
+                const opt = this.getCellValue(row[c]);
+                if (opt && opt.trim() !== '') {
+                    options.push(opt);
+                }
+            }
+
+            // 判断题型（根据答案字符数和原始答案格式判断）
+            const type = this.detectQuestionType(questionText, options, answer, rawAnswer);
+
+            questions.push(this.normalizeQuestion({
                 id: questions.length + 1,
                 question: questionText,
                 options: options,
                 answer: answer,
                 type: type
-            });
+            }));
         }
-        
+
         return questions;
     },
 
@@ -115,6 +186,7 @@ const ExcelParser = {
 
     /**
      * 标准化答案格式
+     * "正确"/"对" → "A", "错误"/"错" → "B"
      * 多选题答案保持原样（如"AB"、"ACDE"）
      * 单选题答案转换为单个字母
      */
@@ -123,28 +195,52 @@ const ExcelParser = {
         const str = String(answer).toUpperCase().trim();
         // 去掉可能的空格（如 "A,B" 转为 "AB"）
         const cleaned = str.replace(/[,，\s]/g, '');
-        
+
+        // 判断题：中文"正确""对" → A, "错误""错" → B
+        if (/^(正确|对|TRUE|YES|√|∨)$/i.test(cleaned)) return 'A';
+        if (/^(错误|错|FALSE|NO|×|X)$/i.test(cleaned)) return 'B';
+
         // 如果是单个字母（A-J），直接返回
         if (/^[A-J]$/.test(cleaned)) return cleaned;
-        
+
         // 如果是单个数字（1-10），转换为字母
         const num = parseInt(cleaned);
         if (cleaned.length === 1 && num >= 1 && num <= 10) {
             return String.fromCharCode(64 + num);
         }
-        
+
         // 否则保持原样（可能是多选题答案如"AB"、"ACDE"）
         return cleaned;
     },
 
     /**
      * 检测题型
-     * 根据答案自动判断：单字符=单选题/判断题，多字符=多选题
+     * - 答案多字符 → 多选
+     * - 无选项 + 原始答案是"正确/错误/对/错" → 判断
+     * - 无选项 + 原始答案是字母 → 单选/多选
+     * - 仅2个选项 → 判断
      */
-    detectQuestionType(question, options, answer) {
+    detectQuestionType(question, options, answer, rawAnswer) {
         // 判断是否为多选题（答案多于一个字符）
         if (answer && answer.length > 1) {
             return 'multi';
+        }
+        
+        // 如果选项为0（用户只填了答案+题目两列）
+        if (options.length === 0) {
+            const raw = String(rawAnswer || '').trim();
+            // 原始答案是"正确/错误/对/错"等判断格式 → 判断
+            if (/^(正确|对|TRUE|YES|√|∨|错误|错|FALSE|NO|×|X)$/i.test(raw)) {
+                return 'judge';
+            }
+            // 答案是A/B + 题目以"判断："开头 或 以"错误"/"错"结尾 → 判断
+            if (/^[AB]$/i.test(raw)) {
+                if (/^判断：/.test(question) || /(错误|错)$/.test(question)) {
+                    return 'judge';
+                }
+            }
+            // 原始答案是字母（A/B/C/D等）→ 单选，后续自动补ABCDE空选项
+            return 'single';
         }
         
         // 如果选项少于等于2个，判定为判断题
@@ -152,12 +248,36 @@ const ExcelParser = {
             return 'judge';
         }
         
-        // 如果题目包含"判断"字样
-        if (/判断/.test(question)) {
-            return 'judge';
+        return 'single';
+    },
+
+    /**
+     * 预处理题目：补全缺失选项
+     * - 判断题无选项 → 补充"正确"/"错误"
+     * - 单选/多选无选项 → 补充ABCDE空选项
+     */
+    normalizeQuestion(question) {
+        const q = { ...question };
+        
+        // 判断题：如果没有选项，自动补充"正确"和"错误"
+        if (q.type === 'judge' && q.options.length === 0) {
+            q.options = ['正确', '错误'];
+            if (!/^[AB]$/i.test(q.answer)) {
+                q.answer = 'A';
+            }
         }
         
-        return 'single';
+        // 判断题：如果只有1个选项，补充另一个
+        if (q.type === 'judge' && q.options.length === 1) {
+            q.options = ['正确', '错误'];
+        }
+        
+        // 单选/多选：如果0选项（用户只填了答案+题目），提供5个空选项
+        if ((q.type === 'single' || q.type === 'multi') && q.options.length === 0) {
+            q.options = ['', '', '', '', ''];
+        }
+        
+        return q;
     },
 
     /**

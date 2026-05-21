@@ -9,6 +9,7 @@
     const state = {
         mode: 'home',           // home | quiz | result
         quizMode: 'sequence',   // sequence | random | review
+        typeFilter: 'all',      // all | single | multi | judge
         questions: [],
         displayQuestions: [],
         currentIndex: 0,
@@ -85,6 +86,9 @@
         DOM.pickerTrigger = document.getElementById('pickerTrigger');
         DOM.questionPicker = document.getElementById('questionPicker');
         DOM.pickerGrid = document.getElementById('pickerGrid');
+
+        // Type Filter
+        DOM.typeFilter = document.getElementById('typeFilter');
         
         // Result View
         DOM.resultIcon = document.getElementById('resultIcon');
@@ -143,6 +147,11 @@
             DOM.pickerTrigger.addEventListener('click', togglePicker);
         }
         document.addEventListener('click', handleOutsideClick);
+        
+        // 题型筛选
+        if (DOM.typeFilter) {
+            DOM.typeFilter.addEventListener('change', handleTypeFilterChange);
+        }
         
         // 结果页按钮
         DOM.restartBtn.addEventListener('click', restartQuiz);
@@ -273,6 +282,11 @@
         DOM.homeBtn.style.display = isQuizMode ? 'flex' : 'none';
         DOM.statsMini.style.display = isQuizMode ? 'flex' : 'none';
         
+        // 题型筛选仅在刷题模式显示
+        if (DOM.typeFilter && DOM.typeFilter.parentElement) {
+            DOM.typeFilter.parentElement.style.display = isQuizMode ? '' : 'none';
+        }
+        
         state.mode = viewName;
     }
 
@@ -313,19 +327,28 @@
         state.userAnswers = {};
         // 注意：currentBankId 由调用方设置，quiz模式下不清空
         
+        // 设置题型筛选默认值
+        if (DOM.typeFilter) {
+            DOM.typeFilter.value = 'all';
+        }
+        state.typeFilter = 'all';
+        
         // 获取原始题目数组（顺序刷题和随机刷题共用）
         const allQuestions = Storage.getQuestions();
         
         if (mode === 'random') {
             // 随机刷题：打乱顺序，但使用原始题目对象
-            state.displayQuestions = shuffleArray([...allQuestions]);
+            state.questions = shuffleArray([...allQuestions]);
         } else if (mode === 'review') {
             const wrongIds = Storage.getWrongAnswers().map(w => w.questionId);
-            state.displayQuestions = allQuestions.filter(q => wrongIds.includes(q.id));
+            state.questions = allQuestions.filter(q => wrongIds.includes(q.id));
         } else {
             // 顺序刷题：使用原始顺序
-            state.displayQuestions = [...allQuestions];
+            state.questions = [...allQuestions];
         }
+        
+        // 应用题型筛选
+        applyTypeFilter();
         
         // 检查是否有保存的答题进度
         const savedProgress = Storage.getQuizProgress();
@@ -354,11 +377,7 @@
             switchView('quiz');
             renderQuestion();
             
-            // 如果当前题目已答题，显示答案
-            if (state.answeredRecords[state.displayQuestions[state.currentIndex]?.id] !== undefined) {
-                state.answered = true;
-                showAnswerFeedback();
-            }
+            // 如果当前题目已答题，renderQuestion 会自动恢复显示状态
             
             return;
         }
@@ -369,6 +388,54 @@
         switchView('quiz');
         
         // 渲染第一题
+        renderQuestion();
+    }
+
+    /**
+     * 应用题型筛选
+     */
+    function applyTypeFilter() {
+        if (state.typeFilter === 'all') {
+            state.displayQuestions = [...state.questions];
+        } else {
+            state.displayQuestions = state.questions.filter(q => q.type === state.typeFilter);
+        }
+        // 重置索引
+        state.currentIndex = 0;
+    }
+
+    /**
+     * 题型筛选变更
+     */
+    function handleTypeFilterChange() {
+        if (!DOM.typeFilter) return;
+        state.typeFilter = DOM.typeFilter.value;
+        
+        // 清除进度缓存
+        Storage.clearQuizProgress();
+        
+        // 重置状态
+        state.currentIndex = 0;
+        state.selectedAnswer = null;
+        state.selectedAnswers = [];
+        state.answered = false;
+        state.stats = { correct: 0, wrong: 0 };
+        state.wrongAnswers = [];
+        state.wrongStreakCount = {};
+        state.answeredRecords = {};
+        state.userAnswers = {};
+        
+        // 重新筛选
+        applyTypeFilter();
+        
+        // 如果没有匹配的题目
+        if (state.displayQuestions.length === 0) {
+            showToast('该题型暂无题目', 'info');
+            return;
+        }
+        
+        // 更新UI
+        updateStats();
         renderQuestion();
     }
 
