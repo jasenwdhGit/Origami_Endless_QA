@@ -86,7 +86,7 @@ const ExcelParser = {
 
         if (sampleRows.length === 0) return { ...defaults, dataStartRow: startRow };
 
-        // 计算每列平均文本长度（短=答案，长=题目）
+        // 计算每列平均文本长度（短=答案，长=题目），忽略空列
         const colAvgs = [];
         for (let c = 0; c < colCount; c++) {
             let totalLen = 0, count = 0;
@@ -97,27 +97,31 @@ const ExcelParser = {
             colAvgs.push({ col: c, avg: count > 0 ? totalLen / count : 0 });
         }
 
-        const sorted = [...colAvgs].sort((a, b) => a.avg - b.avg);
+        // 只保留有内容的列
+        const nonEmptyCols = colAvgs.filter(c => c.avg > 0);
+        if (nonEmptyCols.length < 2) return defaults;
+        
+        const sortedByAvg = [...nonEmptyCols].sort((a, b) => a.avg - b.avg);
 
-        if (colCount === 2) {
+        const effectiveColCount = nonEmptyCols.length;
+        if (effectiveColCount === 2) {
             // 仅2列：短列=答案，长列=题目
             return {
-                answerCol: sorted[0].col,
-                questionCol: sorted[1].col,
-                optionStartCol: 2,
+                answerCol: sortedByAvg[0].col,
+                questionCol: sortedByAvg[1].col,
+                optionStartCol: colCount,
                 dataStartRow: startRow
             };
         }
 
         // 3列及以上：最短=答案，最长=题目
-        const answerCol = sorted[0].col;
-        const questionCol = sorted[sorted.length - 1].col;
-        const maxCol = Math.max(answerCol, questionCol);
+        const answerCol = sortedByAvg[0].col;
+        const questionCol = sortedByAvg[sortedByAvg.length - 1].col;
 
         return {
             answerCol,
             questionCol,
-            optionStartCol: colCount > maxCol + 1 ? maxCol + 1 : colCount,
+            optionStartCol: colCount,
             dataStartRow: startRow
         };
     },
@@ -147,9 +151,10 @@ const ExcelParser = {
             const questionText = this.getCellValue(row[layout.questionCol]);
             if (!questionText) continue;
 
-            // 从选项起始列开始读取选项
+            // 读取选项：扫描所有列，跳过答案列和题目列
             const options = [];
-            for (let c = layout.optionStartCol; c < row.length; c++) {
+            for (let c = 0; c < row.length; c++) {
+                if (c === layout.answerCol || c === layout.questionCol) continue;
                 const opt = this.getCellValue(row[c]);
                 if (opt && opt.trim() !== '') {
                     options.push(opt);

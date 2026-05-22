@@ -226,12 +226,18 @@
             
             const questions = await ExcelParser.parse(file);
             
-            // 保存到本地存储
-            Storage.saveQuestions(questions);
+            // 更新内存状态（不依赖 localStorage 是否成功）
+            state.questions = questions;
             
-            // 保存题库记录
+            // 保存到本地存储（大数据可能失败）
+            const saved = Storage.saveQuestions(questions);
+            if (!saved) {
+                showToast('题目数据较大，无法缓存到浏览器，当前会话可用', 'warning');
+            }
+            
+            // 保存题库记录（不包含完整题目数据，体积小）
             const bankName = file.name.replace(/\.(xlsx|xls)$/i, '');
-            const savedBank = Storage.saveQuestionBank({
+            Storage.saveQuestionBank({
                 name: bankName,
                 fileName: file.name,
                 questionCount: questions.length,
@@ -242,9 +248,6 @@
             const banks = Storage.getQuestionBanks();
             const currentBank = banks.find(b => b.name === bankName);
             state.currentBankId = currentBank ? currentBank.id : null;
-            
-            // 更新状态
-            state.questions = questions;
             
             showToast(`成功加载 ${questions.length} 道题目`, 'success');
             
@@ -333,8 +336,17 @@
         }
         state.typeFilter = 'all';
         
-        // 获取原始题目数组（顺序刷题和随机刷题共用）
-        const allQuestions = Storage.getQuestions();
+        // 获取原始题目数组：优先使用内存数据，否则从 localStorage 读取
+        let allQuestions = state.questions;
+        if (!allQuestions || allQuestions.length === 0) {
+            allQuestions = Storage.getQuestions();
+        }
+        
+        if (allQuestions.length === 0) {
+            showToast('没有可用的题目数据，请先上传题库', 'error');
+            goHome();
+            return;
+        }
         
         if (mode === 'random') {
             // 随机刷题：打乱顺序，但使用原始题目对象
@@ -754,13 +766,16 @@
     function renderPickerGrid() {
         if (!DOM.pickerGrid) return;
         const total = state.displayQuestions.length;
-        DOM.pickerGrid.innerHTML = state.displayQuestions.map((q, i) => {
-            let className = 'picker-item';
-            // 获取原始题目ID
+        
+        // 使用 DocumentFragment 批量构建，一次插入 DOM
+        const fragment = document.createDocumentFragment();
+        
+        for (let i = 0; i < total; i++) {
+            const q = state.displayQuestions[i];
             const questionId = q.id;
-            // 用原始题目ID查找答题状态
             const answeredResult = state.answeredRecords ? state.answeredRecords[questionId] : undefined;
             
+            let className = 'picker-item';
             if (i === state.currentIndex) {
                 className += ' current';
             } else if (answeredResult !== undefined) {
@@ -770,20 +785,29 @@
                     className += answeredResult ? ' correct' : ' wrong';
                 }
             }
-            // 显示原始题号
-            return `<div class="${className}" data-index="${i}">${questionId}</div>`;
-        }).join('');
-        
-        // 绑定点击事件
-        DOM.pickerGrid.querySelectorAll('.picker-item').forEach(item => {
-            item.addEventListener('click', (e) => {
+            
+            const div = document.createElement('div');
+            div.className = className;
+            div.dataset.index = i;
+            div.textContent = questionId;
+            div.addEventListener('click', (e) => {
                 e.stopPropagation();
-                const index = parseInt(item.dataset.index);
+                const index = parseInt(e.currentTarget.dataset.index);
                 DOM.questionPicker.classList.remove('show');
                 DOM.pickerTrigger.classList.remove('active');
                 jumpToQuestion(index);
             });
-        });
+            fragment.appendChild(div);
+        }
+        
+        DOM.pickerGrid.innerHTML = '';
+        DOM.pickerGrid.appendChild(fragment);
+        
+        // 更新导航面板标题显示总数
+        const pickerTitle = document.querySelector('.picker-title');
+        if (pickerTitle) {
+            pickerTitle.textContent = `题目导航（共 ${total} 题）`;
+        }
     }
 
     function initSwipeGesture() {
@@ -992,6 +1016,8 @@
     }
 
     function finishQuiz() {
+        // 清除待保存的定时器
+        if (saveProgressTimer) { clearTimeout(saveProgressTimer); saveProgressTimer = null; }
         // 清除答题进度
         Storage.clearQuizProgress();
         
@@ -1091,12 +1117,21 @@
     }
 
     /**
-     * 保存答题进度到本地缓存
+     * 保存答题进度到本地缓存（带防抖，避免大数据量频繁写入）
      */
+    let saveProgressTimer = null;
     function saveQuizProgress() {
         // 不保存复习模式
         if (state.quizMode === 'review') return;
         
+        // 防抖：300ms 内多次调用只保存最后一次
+        if (saveProgressTimer) clearTimeout(saveProgressTimer);
+        saveProgressTimer = setTimeout(() => {
+            doSaveQuizProgress();
+        }, 300);
+    }
+    
+    function doSaveQuizProgress() {
         Storage.saveQuizProgress({
             currentIndex: state.currentIndex,
             answeredRecords: state.answeredRecords,
@@ -1107,6 +1142,14 @@
             questionIds: state.displayQuestions.map(q => q.id)
         });
     }
+    
+    // 页面关闭前立即保存进度
+    window.addEventListener('beforeunload', () => {
+        if (saveProgressTimer) {
+            clearTimeout(saveProgressTimer);
+            doSaveQuizProgress();
+        }
+    });
 
     function updateWrongCountBadge() {
         const count = Storage.getWrongAnswers().length;
